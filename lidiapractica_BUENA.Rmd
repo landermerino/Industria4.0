@@ -1,0 +1,519 @@
+---
+title: "Treball-DiscriminacioBancària"
+author: "Lander"
+date: "16/11/2020"
+output:
+  word_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Limpiar workspace
+```{r}
+# Limpiar plots
+if(!is.null(dev.list())) dev.off()
+
+# Limpiar workspace
+rm(list=ls())
+```
+
+
+##Asignar directorio y cargar datos
+```{r}
+setwd("C:/Users/Lander/Desktop/INDUSTRIA 4.0/Industria 4.0, Estadistica y Gestion de Datos/Practicas/Treball-DiscriminacioBancària")
+
+load("C:/Users/Lander/Desktop/INDUSTRIA 4.0/Industria 4.0, Estadistica y Gestion de Datos/Practicas/Treball-DiscriminacioBancària/02 - HMDA-raw.RData") 
+```
+
+##Cargar librerias
+```{r}
+library(car)
+library(effects)
+library(ROCR)
+library(FactoMineR)
+library(ggplot2)
+library(missMDA)
+```
+
+##Primer analisis de las variables
+pirat -> relacion entre los pagos de deudas y los ingresos. Por lo tanto cuanto mayor sea esta variable, se intuye que tendrá mas posibilidades de que le rechazen el credito ya que pirat=1 supondria que todo lo que gana el individuo iria destinado unicamente a pagar sus deudas. Esto indica una alta probabilidad de que no pueda hacer frente a las cuotas mensuales de la deuda si tiene cualquier otro gasto extra.
+
+hirat -> relacion entre los pagos destinados a la vivienda y los ingresos. Esta variable deberia ser menor o igual a la variable pirat, ya que pirat incluye los gastos de vivienda entre el total de las deudas a pagar. A priori deberia de seguir la relacion con pirat, es decir, cuanto mayor sea este valor, mas probabilidades de rechazar el credito.
+
+lvrat -> relacion entre el credito solicitado para la casa y el valor de la casa. Cuanto mas alto sea este valor significaria que el individio ha solicitado un prestamo muy alto en relacion al inmueble que quiere comprar, por lo que se presupone que no dispone de mucho dinero ya que solo puede hacer frente a un pequeño pago inicial de la propiedad. Se presupone entonces que cuanto mas mayor sea este valor mas probabilidades habra de que rechazen el credito.
+
+```{r}
+summary(HMDA)
+
+#Los bigotes (las dos baras de cada lado) indican el rango de aceptabilidad para que una observacion no sea considerada como atipica (posible outliers), las observaciones que suelen estar fuera de este rango suelen ser outliers severos (mas de 3 veces la distancia intercuartil)
+calcQ <- function(x) {
+  s.x <- summary(x)
+  iqr<-s.x[5]-s.x[2]
+  list(souti=s.x[2]-3*iqr, mouti=s.x[2]-1.5*iqr, min=s.x[1], q1=s.x[2], q2=s.x[3], 
+       q3=s.x[5], max=s.x[6], mouts=s.x[5]+1.5*iqr, souts=s.x[5]+3*iqr ) }
+
+#Distancia intercualtil = Q3-Q1
+#Q3 + 3* Distancia intercuartil --> distancia en la que serian posibles outliers 
+
+boxplot(HMDA$pirat,main="pirat",horizontal=TRUE)
+abline(v=calcQ(HMDA$pirat)$souts,col="blue")
+
+boxplot(HMDA$hirat,main="hirat",horizontal=TRUE)
+abline(v=calcQ(HMDA$hirat)$souts,col="blue")
+
+boxplot(HMDA$lvrat,main="lvrat",horizontal=TRUE)
+abline(v=calcQ(HMDA$lvrat)$souts,col="blue")
+
+#No se va a realizar un analisis sobre los posibles outliers de cada variable numerica. Sin embargo para los casos de pirat y hirat vamos a tratar los 3 outliers que estan por encima del valor 1, ya que serian casos muy atipicos que el cliente tendría una deuda mas alta que sus ingresos. Se procedera a imputar estas observaciones con el objetivo de conseguir un estudio mas claro.
+
+#Respecto a la variable lvrat, se observa en las observaciones de los posibles outliers que aunque tengan un valor bastante alto, piden un prestamo de casi el doble del valor de la casa, las variable pirat y hirat son relativamente bajas, por lo que se intuye que estos individuos tienen una renta muy alta que puede hacer frente a los pagos.
+```
+
+#Otra cosa que observamos es que hay ceros absolutos en las variables pirat y hirat, estos no son creibles, ya que significaria que los clientes no han solicitado ningun credito
+```{r}
+#Se procede a tratar imputar los ceros absolutos y los ouliers mencionados
+
+vars_raras<-names(HMDA)[c(2,3)]
+summary(HMDA[ ,vars_raras])
+boxplot(HMDA[ ,vars_raras])
+ll<-which(HMDA$pirat==0);length(ll)
+HMDA$pirat[ ll ]<-NA #se les adjudica valor nulo a los ceros
+ll3<-which(HMDA$pirat>calcQ(HMDA$pirat)$souts);length(ll3);ll3
+HMDA$pirat[c(1095,1928,1929)]<-NA
+ll1<-which(HMDA$hirat==0);length(ll1)
+HMDA$hirat[ ll1 ]<-NA #se les adjudica valor nulo a los ceros
+ll2<-which(HMDA$hirat>calcQ(HMDA$hirat)$souts);length(ll2);ll2
+HMDA$hirat[c(1095,1928,1929)]<-NA
+
+summary(HMDA[ ,vars_raras])
+#Imputacion sobre numericas imputePCA()
+names(HMDA)
+res.impu <- imputePCA( HMDA[ ,2:4])
+summary(res.impu$completeObs)
+
+HMDA$pirat <- res.impu$completeObs[ ,"pirat"]
+HMDA$hirat <- res.impu$completeObs[ ,"hirat"]
+
+summary(HMDA[ , vars_raras]) #ya no hay NA
+boxplot(HMDA[ ,vars_raras],horizontal=TRUE)
+```
+
+
+### 1.	Se crea una nueva variable mediante los siguientes comandos en R. Se pide interpretar el significado de la nueva variable f.rpr2preu
+
+```{r}
+HMDA$f.rpr2preu <- factor(ifelse(HMDA$lvrat < 0.8, "low", ifelse(HMDA$lvrat >= 0.8 & HMDA$lvrat <= 0.95, "medium", "high")), levels = c("low", "medium", "high"))
+
+attach(HMDA)
+
+summary(f.rpr2preu)
+
+pie(table(f.rpr2preu),main="f.rpr2preu pie")#la mayoria tiene un endeudamiento bajo
+```
+
+La nueva variable representa el nivel de endeudamiento (bajo, medio o alto) de la persona sobre el valor real del inmueble.Esta variable tiene una relacion directa con lvrat, por lo que su influencia seria la misma que la interpretada anteriormente para lvrat.
+
+
+### 2.	Valorad la relación lineal entre las variables numéricas disponibles. Indicad qué variables numéricas están significativamente relacionadas con la respuesta numérica hirat.
+
+hirat -> Compara los gastos de la casa en relacion con lo que gana antes de impuestos
+
+```{r}
+sapply(HMDA, class)
+HMDA_numeric<-data.frame(hirat,pirat,lvrat,unemp)
+pairs(x = HMDA_numeric, lower.panel = NULL) #como el plot pero solo te deja el triangulo, se observa que la variable pirat tiene una alta relacion con hirat
+
+round(cor(HMDA[,c(3,2,4,8)]),digits=3) #esta relacion es del 66%
+
+ggplot(data = HMDA, aes(x = pirat, y = hirat)) + 
+  geom_point(colour = "red4") +
+  geom_smooth(method = lm) +
+  ggtitle("hirat vs pirat") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#se observa que al incrementar el valor de pirat, aumenta el valor de hirat. Esto tiene mucho sentido ya que la variable pirat (total de pagos de deudas) recoge dentro de ella el valor de hirat (pago de deudas de la casa). Por lo tanto, estas variables estan altamente relacionadas
+
+```
+
+### 3.	Valorad la asociación global entre la respuesta numérica y los factores disponibles. Indicad qué factor parece más asociado con hirat.
+
+```{r}
+#El factor que produzca un cambio mayor en la media de la respuesta hirat, seran los factores mas asociados
+
+tapply(hirat,deny,summary); plot(hirat~deny, col = c("red", "green"), main = "deny vs. hirat",horizontal=TRUE) #MEAN NO=0.251 YES=0.275  SE OBSERVA DIFERENCIAS EN EL BOXPLOT, EL FACTOR PARECE ESTAR ALGO ASOCIADO CON HIRAT
+
+tapply(hirat,insurance,summary); plot(hirat~insurance, col = c("red", "green"), main = "insurance vs. hirat",horizontal=TRUE) #MEAN NO=0.254 YES=0.269 NO SE OBSERVA MUCHA DIFERENCIA
+
+tapply(hirat,chist,summary); plot(hirat~chist, col = c("red", "green"), main = "chist vs. hirat",horizontal=TRUE) #MEAN 1=0.254 2=0.248 3=0.250 4=0.281 5=0.260 6=0.254 SE OBSERVAN DIFERENCIAS EN EL BOXPLOT, PARECE TENER UN GRADO ALTO DE ASOCIACION
+
+tapply(hirat,phist,summary); plot(hirat~phist, col = c("red", "green"), main = "phist vs. hirat",horizontal=TRUE) #MEAN NO=0.253 YES=0.2653 NO SE OBSERVA MUCHA DIFERENCIA
+
+tapply(hirat,mhist,summary); plot(hirat~mhist, col = c("red", "green"), main = "mhist vs. hirat",horizontal=TRUE) #MEAN 1=0.239 2=0.261 3=0.253 4=0.239 PARECE TENER EL GRADO MAS ALTO DE ASOCIACION CON LA VARIABLE DE RESPUESTA
+
+tapply(hirat,selfemp,summary); plot(hirat~selfemp, col = c("red", "green"), main = "selfemp vs. hirat",horizontal=TRUE) #MEAN NO=0.256 YES=0.237 TIENE CIERTA ASOCIACION
+
+tapply(hirat,condomin,summary); plot(hirat~condomin, col = c("red", "green"), main = "condomin vs. hirat",horizontal=TRUE) #MEAN NO=0.257 YES=0.247 NO SE OBSERVA MUCHA ASOCIACION
+
+tapply(hirat,afam,summary); plot(hirat~afam, col = c("red", "green"), main = "afam vs. hirat",horizontal=TRUE) #MEAN NO=0.252 YES=0.267 NO SE OBSERVA MUCHA ASOCIACION
+
+tapply(hirat,single,summary); plot(hirat~single, col = c("red", "green"), main = "single vs. hirat",horizontal=TRUE) #MEAN NO=0.249 YES=0.261 NO SE OBSERVA ASOCIACION
+
+tapply(hirat,hschool,summary); plot(hirat~hschool, col = c("red", "green"), main = "hschool vs. hirat",horizontal=TRUE) #MEAN NO=0.262 YES=0.254 NO SE OBSERVA ASOCIACION
+
+tapply(hirat,f.rpr2preu,summary); plot(hirat~f.rpr2preu, col = c("red", "green"), main = "f.rpr2preu vs. hirat",horizontal=TRUE) #MEAN LOW=0.248 MEDIUM=0.263 HIGH=0.264 NO SE OBSERVA MUCHA ASOCIACION
+
+#Los factores que parecen mas asociados a la respuesta hirat son mhist, chist y deny
+```
+
+### 4.	Valorad la asociación global entre el factor deny y las variables numéricas disponibles. Indicad qué variable numérica parece más asociada con deny.
+
+```{r}
+tapply(pirat,deny,summary); plot(pirat~deny, col = c("red", "green"),horizontal=TRUE, main = "deny vs. pirat") #MEAN NO=0.323  YES=0.372 
+
+tapply(hirat,deny,summary); plot(hirat~deny, col = c("red", "green"),horizontal=TRUE, main = "deny vs. hirat") #MEAN NO=0.251  YES=0.275 BASTANTE SIMILARES LOS VALORES
+
+tapply(lvrat,deny,summary); plot(lvrat~deny, col = c("red", "green"),horizontal=TRUE, main = "deny vs. lvrat") #MEAN NO=0.727  YES=0.816 EN EL GRAFICO SE OBSERVA DIFERENCIAS. PARECE LA MAS ASOCIADA CON DENY 
+
+tapply(unemp,deny,summary); plot(unemp~deny, col = c("red", "green"),horizontal=TRUE, main = "deny vs. unemp") #MEAN NO=3.742  YES=4.01 SIMILARES
+
+#Las variables que parecen mas relacionadas con la respuesta deny son lvrat y pirat
+
+```
+
+
+### 5.	Valorad la asociación global entre el factor deny y los factores disponibles. Indicad qué factor parece más asociado con deny.
+
+```{r}
+table(deny,insurance); plot(deny~insurance, col = c("red", "blue"), main = "deny vs. insurance")
+
+table(deny,chist); plot(deny~chist, col = c("red", "blue"), main = "deny vs. chist")
+
+table(deny,phist); plot(deny~phist, col = c("red", "blue"), main = "deny vs. phist")
+
+table(deny,mhist); plot(deny~mhist, col = c("red", "blue"), main = "deny vs. mhist")
+
+table(deny,selfemp); plot(deny~selfemp, col = c("red", "blue"), main = "deny vs. selfemp")
+
+table(deny,condomin); plot(deny~condomin, col = c("red", "blue"), main = "deny vs. condomin")
+
+table(deny,afam); plot(deny~afam, col = c("red", "blue"), main = "deny vs. afam")
+
+table(deny,single); plot(deny~single, col = c("red", "blue"), main = "deny vs. single")
+
+table(deny,hschool); plot(deny~hschool, col = c("red", "blue"), main = "deny vs. hschool")
+
+table(deny,f.rpr2preu); plot(deny~f.rpr2preu, col = c("red", "blue"), main = "deny vs. f.rpr2preu")
+
+#Claramente el factor mas asociado con deny es insurance ya insurance=yes incrementa las probabilidades de que te rechacen el credito alrededor de un 80%
+```
+
+### 6.	¿Pensais que la respuesta numérica hirat tiene una distribución razonablemente normal? Razonad la respuesta en base a mínimo dos argumentos.
+
+```{r}
+#Argumento n1
+mm<-mean(hirat);ss<-sd(hirat)
+mm;ss
+hist(hirat,freq=F,col="purple",50)
+curve(dnorm(x,mm,ss),col="red",add=T) # visualmente ya se observa que aunque se asemeja algo a una distribucion normal, debido a los valores altos de hirat no sigue una distribucion normal
+
+#Argumento n2
+shapiro.test(hirat) # No hay normalidad, se rechaza la H0
+
+#Argumento n3
+qqnorm(hirat, pch = 20, col = "gray50"); qqline(hirat) #se observa como con valores altos de hirat se desvia mucho de seguir una distribucion normal
+
+plot(hirat~deny, col = c("red", "green"),horizontal=TRUE, main = "deny vs. hirat")
+abline(v=calcQ(HMDA$hirat)$souts,col="blue")
+ll<-which(HMDA$hirat>calcQ(HMDA$hirat)$souts);length(ll);ll
+#Tratando estas observaciones o mediante transformaciones se podría llegar a conseguir normalidad
+```
+
+### 7.	Resulta globalmente significativa la asociación entre la respuesta hirat y los factores deny, afam e Insurance?
+
+```{r}
+m7<-lm(hirat~afam*insurance*deny,data=HMDA)
+Anova( m7 )#Anova con mayuscula. Nos dice que variable es relevante para la respuesta hirat, esto nos lo dice si pvalor<0.05
+#Observamos que solo merece la pena incluir deny
+step(m7) #comprobamos que el modelo que nos devuelve es efectivamente solo con el factor deny
+#Como hemos observado en el apartado 6, la respuesta hirat no sigue una distribucion normal, por lo que no conviene utilizar el metodo Anova ya que te da un resultado suponiendo que la respuesta es normal. Por esto, se utiliza el test de kruskal.
+
+kruskal.test(hirat~deny) #H0 rechazada, resulta significativa la asociacion
+kruskal.test(hirat~afam) #H0 rechazada, resulta significativa la asociacion
+kruskal.test(hirat~insurance) #H0 aceptada, no resulta significativa la asociacion, pertenecen a la misma poblacion de muestras
+```
+
+### 8.	Resulta globalmente significativa la asociación entre la respuesta deny y los factores f.rpr2preu, afam e insurance.?
+
+```{r}
+m8<-glm(deny~afam*insurance*f.rpr2preu,data=HMDA,family=binomial) # deny es una respuesta binomial (yes or no)
+
+step(m8)#otra forma, nos devuelve el mejor modelo (mas simple). Se observa que el mejor modelo es el que no tiene en cuenta las interacciones
+Anova( m8 )
+#observamos que no merece la pena incluir las interacciones
+#Por lo tanto resulta significativa la asociacion aditiva de esos factores
+kruskal.test(deny~f.rpr2preu) #H0 rechazada, resulta significativa la asociacion
+kruskal.test(deny~afam) #resulta significativa la asociacion
+kruskal.test(deny~insurance) #La asociacion mas significativa
+
+```
+
+### 9.	Resulta globalmente significativa la asociación entre la respuesta deny y las variables numéricas hirat  y lvrat?
+
+```{r}
+m9<-glm(deny~hirat*lvrat,data=HMDA,family=binomial)
+
+step(m9)#se observa que el mejor modelo es el incluye las interacciones
+
+Anova( m9 ) #comprobamos que el modelo que nos ha devuelto la función step es el correcto y por lo tanto si resulta significativa esta asociacion
+
+```
+
+### 10.	Indicad las variables y factores globalmente más relacionados con la respuesta hirat según condes(), así como las categorías de los factores más sensibles a mostrar diferencias significativas en la respuesta hirat.
+
+```{r}
+sapply(HMDA, class)
+HMDA_factor1<-names(HMDA)[c(1,5:7,9:15)]
+HMDA_numeric1<-names(HMDA)[c(2,3,4,8)]
+
+res.con10<-condes(HMDA[,c("hirat",HMDA_factor1,HMDA_numeric1)],1)
+names(res.con10)
+res.con10$quanti #pirat con una correlacion del 67%
+res.con10$quali #mhist, deny y f.rpr2preu.
+#R2 para mhist indica que casi el 2% de toda la variabilidad que tiene la respuesta hirat puede ser explicado por mhist
+
+res.con10$category #Se observa que con chist=4 la media global de la variable target aumenta en 0.023
+```
+
+### 11.	Indicad las variables y factores globalmente más relacionados con la respuesta deny según catdes() y concretamente más asociados con el nivel de la respuesta deny=Yes.
+
+```{r}
+res.con11<-catdes(HMDA[,c("deny",HMDA_factor1,HMDA_numeric1)],1)
+names(res.con11)
+res.con11$test.chi2 #insuance, phist,chist,afam
+res.con11$category #insurance=yes -> probabilidad de deny=yes del 91.67%, phist=yes -> probabilidad de deny=yes del 43.43%
+res.con11$quanti.var #cuanto mas alto eta2, mas significancia. pirat la mas relacionada seguida de lvrat
+res.con11$quanti #observamos que nos confirma que pirat es la mas relacionada seguida de lvrat
+
+#Variables mas relacionadas con la respuesta deny=yes -> pirat seguido de lvrat
+#Factores mas relacionados con la respuesta deny=yes -> insurance=yes seguido de phist=yes
+```
+
+### 12.	Calcular el modelo lineal generalizado nulo para la respuesta binaria deny utilizando el enlace canónico para respuestas binomiales.
+
+```{r}
+m12 <- glm(deny~1,data=HMDA,family=binomial)
+summary(m12)
+# Ecuación enlace logit
+# log(pi/(1-pi)) = -1.995 el logit de la probabilidad de que te rechazen el credito (deny=yes)
+```
+
+### 13.	Calcular el modelo lineal generalizado nulo para la respuesta binaria deny utilizando el enlace probit.
+
+```{r}
+m13<-glm(deny~1 ,data=HMDA,family=binomial(link="probit"))
+summary(m13)
+# Ecuación enlace probit
+# Φ^-1(π) = -1.176 el probit de la probabilidad de que te rechazen el credito
+# Observamos en la tabla logit/probit que estos valores tienen sentido, ya que la probabilidad del enlace probit es menor que la del logit
+```
+
+### 14.	Argumentad en el modelo logit para deny si la probabilidad de rechazar un crédito hipotecario es distinta en la subpoblación afroamericana que en el resto de ciudadanos estadounidenses. Utilizar un contraste formal basado en inferencia estadística.
+
+```{r}
+#Vamos a utilizar la siguiente hipotesis para este contraste basado en inferencia estadistica:
+#H0= La probabilidad de rechazar un credito hipotecario teniendo en cuenta solo el factor racial del cliente es la misma
+m14<-glm(deny~afam,data=HMDA,family=binomial)
+
+Anova(m14)#Se rechaza la H0, el factor afam si influye en la respuesta deny
+
+plot(allEffects(m14)) # Se observa como el hecho de ser afroamericano aumenta significativamente la probabilidad de que te rechacen el credito
+
+kruskal.test(deny~afam)
+
+coef(m14)
+
+#Para población afroamerica
+# Ecuación enlace logit
+# log(pi/(1-pi)) = -2.28 + 1.35 el logit de la probabilidad de que te rechazen el credito (deny=yes)
+
+#Para población NO afroamerica
+# Ecuación enlace logit
+# log(pi/(1-pi)) = -2.28 el logit de la probabilidad de que te rechazen el credito (deny=yes)
+
+table(deny,afam); plot(deny~afam, col = c("red", "blue"), main = "deny vs. afam") #comprobamos visualmente como la probabilidad de rechazar el credito a un individuo afroamericano es superior.
+
+#Se observa como a los infividuos afroamericanos han rechazado el credito 96 veces por cada 243 solicitudes, mientras que a los que no son afroamericanos solo han rechazado 189 creditos por cada 1852 solicitudes
+```
+
+### 15.	Interpretar en el modelo logit para deny el efecto bruto del factor afam en la escala logit, escala de los odds y aproximadamente en términos de probabilidades.
+
+SE USA MODELO DEL APARTADO 14
+
+```{r}
+#Para población afroamerica
+eta<-coef(m14)[1]+coef(m14)[2];eta #eta es la n con la cola larga
+prob1<-exp(eta)/(1+exp(eta)); prob1 #nos da la probabilidad de denegar prestamo siendo afroamericano es del 28.3%
+
+#Para población NO afroamericana
+eta2<-coef(m14)[1];eta2 
+prob2<-exp(eta2)/(1+exp(eta2));prob2 #probabilidad de denegar prestamo NO siendo afroamericano es del 9.3%
+prob1;prob2 # se observa como el factor de ser afroamericano afecta significativamente en la respuesta deny
+
+exp(coef(m14)[2]) #NOS INDICA QUE LA PROBABILIDAD ODD DE QUE TE RECHACEN EL PRESTAMO SIENDO AFROAMERICANO AUMENTA 3.87 veces
+
+#Comprabamos que esto es cierto
+odd1<-exp(eta); odd1 #la probabilidad de que te rechacen el prestamo por solo ser afroameicano es de 0.395 contra 1
+odd2<-exp(eta2); odd2 #la probabilidad de que te rechacen el prestamo sin ser afroameicano es de 0.102 contra 1
+#0.102*3.87=3.95   se observa que este resultado es cierto
+
+prop.table(table(afam,deny),1) #muestra las probabilidades de que te rechacen el credito (deny=yes) dependiendo del factor afam. Se observa que nos da la misma probabilidad 28% de que te lo rechacen siendo afroamericano.
+```
+
+### 16.	Interpretar en el modelo logit para deny el efecto neto del factor afam dado que el factor insurance ya está en el modelo en la escala logit, escala de los odds y aproximadamente en términos de probabilidades.
+
+```{r}
+m16<-glm(deny~insurance * afam,data=HMDA,family=binomial)
+
+plot(allEffects(m16)) #•se observa que son rectas bastante paralelas, por lo tanto las interaccioens tienen un efecto significativo bajo
+
+Anova( m16 )#observamos que efectivamente no merece la pena incluir las interacciones
+
+m16b<-step(m16)
+coef(m16b)
+
+#la influencia que tiene cada factor en los odds
+exp(coef(m16b)[2])
+exp(coef(m16b)[3])
+
+eta1<-coef(m16b)[1]+coef(m16b)[2]# solo insurance
+eta2<-coef(m16b)[1]+coef(m16b)[2]+coef(m16b)[3] #insurance + afam
+
+#Cálculo de las probabilidades odds de rechazar el credito
+oddnai<-exp(eta1); oddnai #no afroamericano e insurance=yes sin interaccion
+oddai<-exp(eta2); oddai #afroamericano e insurance=yes sin interaccion
+
+#Cálculo de las probabilidades de rechazar el credito
+probnai <- exp(eta1)/(1+exp(eta1)); probnai #no afroamericano e insurance=yes sin interaccion
+probai <- exp(eta2)/(1+exp(eta2)); probai #afroamericano e insurance=yes sin interaccion
+
+oddnai;oddai
+probnai;probai
+
+# se observa que el factor afam aumenta la probabilidad de que deniegen el credito, y teniendo en cuenta el factor insurance, en un 8%
+
+```
+
+### 17.	Calculad la probabilidad prevista de rechazar un crédito solicitado por un individuo afroamericano a quién se le ha aprobado una concesión de seguro hipotecario con el mejor modelo disponible.
+
+```{r}
+#Calculo del mejor modelo
+m17<-glm(deny ~ ., data=HMDA,family=binomial) # utiliza todos los variables  
+m171<-step( m17) #te elige el mejor modelo, con los mejores parametros entre todos los parametros seleccionados
+Anova(m171) #se observa como el pvalor de unemp esta cercano al 0.05, por lo que podriamos no incluirlo tambien. En este caso se ha obtado por incluirlo.
+vif(m171)#para ver si las variables que se utilizan tienen correlacion entre ellas (no deben tenerla, nos enferman el modelo). Empiezan a preocupar cuando superan el valor de 3. En este caso no tenemos correlaciones entre variables.
+marginalModelPlots(m171)#Para las variables numericas. Se observa que se ajustan bastante bien, no hace falta incluir transformaciones cuadraticas ni logaritmicas.
+residualPlots(m171) #vemos que no es muy bueno, el smoother linea roja no cuadra, se podria mejorar usando alguna transformacion o quitar algunas variables.
+
+influencePlot(m171) #Hay observaciones influyentes que habria que tratar (ej. 1321, 801)
+
+po<-Boxplot(cooks.distance(m171));po #Nos devuelve las 10 observaciones con mayor distancia de Cook, las que resultan mas influyentes
+HMDA[1095,]#Con todas las observaciones influyentes devueltas por pp
+#1321 un pirat muy alto y no se le deniega el credito
+#801 un lvrat muy alto e insurance yes y no se le deniega (pirat bajo -> renta alta)
+#845 lvrat muy alto, chist=6 e insurance=yes y no se le deniega (pirat bajo -> renta alta)
+#412 pirat alto y chist=6 y no se le rechaza 
+#574 lvrat alto e insurance=yes y no se le deniega (pirat bajo -> renta alta)
+#2008 lvrat alto e insurance=yes y no se le deniega (pirat bajo -> renta alta)
+#572 pirat alto chist 3 no se rechaza
+#1095 se le deniega sin ninguna razon aparente aparte de mhist=3, el resto muy bueno
+#580 se le deniega con pirat bajo lvrat medio alto y chist 4 y mhist 2
+#1926 se le deniega por un lvrat alto pero el resto muy bueno
+
+
+#Se observa que todas estas observaciones tienen alguna anomalia, algun factor que no se ha tenido en cuenta en este estudio que hace que se aprueben creditos que normalmente serian rechazados o que se rechacen otros que que deberian de ser aprobados. Por esto se decide que vamos a eliminar todas estas observaciones para mejorar nuestro modelo
+
+HMDA_new<-HMDA[-po,]#Se eliminan las observaciones mas influyentes y recalculamos el modelo
+
+m17b<-glm(deny ~ ., data=HMDA_new,family=binomial) # utiliza todos los variables  
+m171b<-step( m17b) #Nos devuelve el mismo modelo
+Anova(m171b) #Observamos que los factores hschool, single y unemp ahora no tienen mucha influencia en la target. Antes hschool y single tenia mas significancia, por lo que con la eliminacion de las observaciones influyentes que hemos realizado podemos intuir que hemos despreciado alguna relacion del factor hschool y single en el target deny. De todas formas se van a incluir todas estas variables en nuestro modelo.
+
+residualPlots(m171b) #Vemos como hemos corregido bastante el smoother del linear predictor
+influencePlot(m171b) #Tenemos menos observaciones influyentes que antes
+
+#Calculo de la probabilidad con el modelo sin eliminar las observaciones inlfluyentes
+eta171<-coef(m171)[1]+coef(m171)[12]
+odda17<-exp(eta171)
+proba17 <- exp(eta171)/(1+exp(eta171))
+odda17;proba17 #la probabilidad de que le rechacen el credito por el simple hecho de ser afroamericano es del 2.5%
+
+#Calculo de la probabilidad con el modelo habiendo eliminado las observaciones influyentes del modelo
+eta171b<-coef(m171b)[1]+coef(m171b)[12]
+odda17b<-exp(eta171b)
+proba17b <- exp(eta171b)/(1+exp(eta171b))
+odda17b;proba17b #la probabilidad de que le rechacen el credito por el simple hecho de ser afroamericano es de alrededor del 1.23%
+
+#Se observa que al eliminar las observaciones influyentes, la probabilidad de que te rechacen el credito siendo afroamericano ha disminuido. Esto nos indica que en las observaciones influyentes el factor afam tenia un peso significativo tambien, lo que nos puede indicar algo de discriminacion
+```
+
+```{r}
+influenceIndexPlot(m171b, id.n=10)
+#Se observa que sigue habiendo observaciones influyentes que sería interesante tratar. Sin embargo se considera que esto queda fuera del objetivo de esta practica
+```
+
+
+### 18.	Calculad la probabilidad prevista de rechazar un crédito solicitado por un individuo que no es afroamericano a quién se le ha aprobado una concesión de seguro hipotecario con el mejor modelo disponible. Comparad el resultado con el valor obtenido en un individuo afroamericano.
+
+```{r}
+#Sin eliminar las observaciones influyentes
+oddna18<-exp(coef(m171)[1])
+probna18<-exp(coef(m171)[1])/(1+exp(coef(m171)[1]))
+oddna18;probna18 #la probabilidad de que te rechacen el credito con el mejor modelo disponible y sin ser afroamericano es del casi 1.34%
+#Observamos que aunque el hecho de ser afroamericano solo aumente un 1.1% la probabilidad de que su credito sea rechazado, en comparativa con no ser afroamericano, es casi el doble de probabilidades, 2.5%. Esto indica que si hay discriminación.
+
+#Eliminando las observaciones influyentes
+oddna18b<-exp(coef(m171b)[1])
+probna18b<-exp(coef(m171b)[1])/(1+exp(coef(m171b)[1]))
+oddna18b;probna18b#la probabilidad de que te rechacen el credito con el mejor modelo disponible y sin ser afroamericano es de alrededor del 0.64%
+#Tambien se observa que la probabilidad de que te rechacen el credito siendo afroamericano es de casi el doble 1.23% 
+```
+
+### 19.	Calculad la capacidad predictiva a partir de la tabla de confusión suministrada donde se enfrentan las predicciones de concesión de crédito según el mejor modelo obtenido con las observaciones reales de deny. Valorar la mejora del modelo respecto el modelo naïve nulo (donde a todos los individuos se les asigna una predicción igual a la más frecuente globalmente, es decir, deny NO).
+
+```{r}
+# Tablas de Confusion con el modelo 171b
+predm1<-ifelse(predict(m171b,type="response")>0.5,1,0) # umbral 0.5 -> respuesta binaria
+predm2<-factor(predm1,labels=c("deny-no","deny-si"))
+tt<-table(predm2,HMDA_new$deny);tt
+100*sum(diag(tt))/sum(tt)  # Capacidad predictiva m171b -> 91.05%
+
+#Curva ROC para visualizar si distingue bien los positivos de los negativos
+dadesroc<-prediction(predict(m171b,type="response"),HMDA_new$deny)
+par(mfrow=c(1,2))
+plot(performance(dadesroc,"err"))
+plot(performance(dadesroc,"tpr","fpr"))
+abline(0,1,lty=2)
+
+#Se observa que los true positive rate esta por encima del 0.9 por lo que el modelo discrimina muy bien entre los positivos y los negativos
+
+#Modelo Naive Nulo
+m0 <- glm(deny~1,data=HMDA_new,family=binomial) #modelo naive nulo
+
+predm4<-ifelse(predict(m0,type="response")>0.5,1,0)
+predm5<-factor(predm4,labels=c("deny-no"))
+tt<-table(predm5,HMDA_new$deny);tt
+100*sum(diag(tt))/sum(tt)  # Capacidad predictiva modelo naive -> 88.1%
+
+#Con umbral=0 hace la prediccion de que todo es deny=no. Me da el mismo resultado. No se puede usar esto tambien?
+
+#Se observa como con el modelo donde se predice para todos los individuos deny=no, suma los falsos positivos del anterior modelo como respuesta no, y los positivos predecidos los suma como falsos positivos (ya que en el modelo no tendriamos ningun deny=yes)
+
+#La mejora del modelo en cuanto a capacidad predictiva no es muy elevada, alrededor del 3%. Esto es debido a que el numero de positivos reales en la muestra es muy bajo, y en proporcion, el modelo predictivo predice muchos mas falsos positivos que negativos, por lo que el modelo Naive nulo no pierde mucha capacidad predictiva.
+```
+
